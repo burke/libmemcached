@@ -42,6 +42,7 @@
 #ifdef HAVE_SYS_SOCKET_H
 # include <sys/socket.h>
 #endif
+#include <sys/time.h>
 
 #ifndef __INTEL_COMPILER
 #pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
@@ -218,10 +219,36 @@ static memcached_return_t io_wait(memcached_instance_st* instance,
     return memcached_set_error(*instance, MEMCACHED_TIMEOUT, MEMCACHED_AT, memcached_literal_param("poll_timeout() was set to zero"));
   }
 
-  size_t loop_max= 5;
-  while (--loop_max) // While loop is for ERESTART or EINTR
+  struct timespec start;
+  bool first_iter= true;
+
+  if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
   {
-    int active_fd= poll(&fds, 1, instance->root->poll_timeout);
+    return memcached_set_error(*instance, MEMCACHED_TIMEOUT, MEMCACHED_AT, memcached_literal_param("clock_gettime() returned error"));
+  }
+
+  while (1) // While loop is for ERESTART or EINTR
+  {
+    long elapsed_ms= 0;
+    if (!first_iter)
+    {
+      struct timespec now;
+
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+      {
+        return memcached_set_error(*instance, MEMCACHED_TIMEOUT, MEMCACHED_AT, memcached_literal_param("clock_gettime() returned error"));
+      }
+
+      elapsed_ms= (now.tv_sec - start.tv_sec) * 1000;
+      elapsed_ms+= (now.tv_nsec - start.tv_nsec) / 1000000;
+      if (elapsed_ms >= instance->root->poll_timeout)
+      {
+        return memcached_set_error(*instance, MEMCACHED_TIMEOUT, MEMCACHED_AT, memcached_literal_param("timed out on restart after EINTR/ERESTART"));
+      }
+    }
+    first_iter= false;
+
+    int active_fd= poll(&fds, 1, instance->root->poll_timeout - elapsed_ms);
 
     if (active_fd >= 1)
     {

@@ -39,6 +39,7 @@
 #include <libmemcached/common.h>
 
 #include <cassert>
+#include <sys/time.h>
 
 #ifndef __INTEL_COMPILER
 #pragma GCC diagnostic ignored "-Wint-in-bool-context"
@@ -76,18 +77,38 @@ static memcached_return_t connect_poll(memcached_instance_st* server, const int 
   fds[0].events= server->events();
   fds[0].revents= 0;
 
-  size_t loop_max= 5;
-
   if (server->root->poll_timeout == 0)
   {
     return memcached_set_error(*server, MEMCACHED_TIMEOUT, MEMCACHED_AT,
                                memcached_literal_param("The time to wait for a connection to be established was set to zero which produces a timeout to every call to poll()."));
   }
 
-  while (--loop_max) // Should only loop on cases of ERESTART or EINTR
+  struct timespec start;
+  bool first_iter= true;
+
+  while (1) // Should only loop on cases of ERESTART or EINTR
   {
+    long elapsed_ms= 0;
+    if (!first_iter)
+    {
+      struct timespec now;
+
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+      {
+        return memcached_set_error(*server, MEMCACHED_TIMEOUT, MEMCACHED_AT, memcached_literal_param("clock_gettime() returned error"));
+      }
+
+      elapsed_ms= (now.tv_sec - start.tv_sec) * 1000;
+      elapsed_ms+= (now.tv_nsec - start.tv_nsec) / 1000000;
+      if (elapsed_ms >= server->root->poll_timeout)
+      {
+        return memcached_set_error(*server, MEMCACHED_TIMEOUT, MEMCACHED_AT, memcached_literal_param("timeout on restart after EINTR/ERESTART"));
+      }
+    }
+    first_iter= false;
+
     int number_of;
-    if ((number_of= poll(fds, 1, server->root->connect_timeout)) == -1)
+    if ((number_of= poll(fds, 1, server->root->connect_timeout - elapsed_ms)) == -1)
     {
       int local_errno= get_socket_errno(); // We cache in case closesocket() modifies errno
       switch (local_errno)
